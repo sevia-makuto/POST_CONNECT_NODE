@@ -1,0 +1,16 @@
+const {
+    generateResetToken,
+    hashResetToken
+} = require("./src/utils/tokenUtils");
+
+const token = generateResetToken();
+
+const hashedToken = hashResetToken(token);
+
+console.log("Original token:", token);
+console.log("Hashed token:", hashedToken);
+
+console.log(
+    "Same token produces same hash:",
+    hashResetToken(token) === hashedToken
+);

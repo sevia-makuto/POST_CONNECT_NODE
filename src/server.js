@@ -1,14 +1,103 @@
+require("dotenv").config();
 
+//importing express
 const express = require('express');
+
+
+const cors = require("cors");
 const app = express();
+const helmet = require("helmet");
+// HTTP security headers
+const helmetOptions = {
+    strictTransportSecurity:
+        process.env.NODE_ENV === "production"
+            ? undefined
+            : false
+};
 
-const port = 3000;
+app.use(helmet(helmetOptions));
+
+const allowedOrigins = [
+    process.env.CLIENT_URL
+];
+
+
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error("Not allowed by CORS"));
+        }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"]
+}));
+//defining the port and host for easing running of the server
+const port = process.env.PORT || 3000;
 const host = 'localhost';
+//configure session
+const session = require("express-session");//express-session provides session management for Express.
+const PgSession = require("connect-pg-simple")(session);//express-session provides session management for Express.
 
+//import database configuration and connections
 const pool = require('./config/db.js');
+//importing middleware configurationp
+const logger = require('./middleware/logger.js');
+const authMiddleware = require('./middleware/authMiddleware.js');
+const errorHandler = require('./middleware/errorHandler.js');
+
+
+// const validAccount = require('./middleware/validAccount.js')
+const validAccountId = require('./middleware/validAccountId.js');
+
+// const validatePagination = require('./middleware/validatePagination');
+const authRoutes = require("./routes/authRoutes");
+const requireAuth = require("./middleware/requireAuth.js");
+const requireRole = require("./middleware/requireRole.js");
+
+
+
 
 // Middleware
 app.use(express.json());
+
+
+
+app.use(
+    session({
+        name :"bank.sid",
+        secret:process.env.SESSION_SECRET,
+        resave:false,
+        saveUninitialized:false,
+        store: new PgSession({
+            pool: pool,
+            createTableIfMissing:true
+        }),
+        cookie:{
+            httpOnly:true,//prevent js from reading the cookie
+            secure:process.env.NODE_ENV === 'production',//sends on secures https
+            sameSite:"none",//help protect against some cross site
+            maxAge:1000*60*60,//last for how long
+            path:"/"//patth to follow
+        }
+    })
+)
+
+
+app.use(logger);
+app.use("/auth", authRoutes);
+
+
+
+//protected router
+
+app.get('/protected',authMiddleware,(req,res) => {
+    res.json({
+        message:"you have accessed a protected route"
+    });
+});
 
 // Home route
 app.get('/', (req, res) => {
@@ -37,7 +126,7 @@ app.get('/db-test', async (req, res) => {
 });
 
 // Get all accounts
-app.get('/accounts', async (req, res) => {
+app.get('/accounts',authRoutes, async (req, res) => {
     try {
         // Execute SQL query
         const results = await pool.query(
@@ -59,8 +148,34 @@ app.get('/accounts', async (req, res) => {
     }
 });
 
+
+// app.get('/accounts', validatePagination, async (req, res, next) => {
+//     try {
+//         const { limit, offset } = req.pagination;
+
+//         const result = await pool.query(
+//             `SELECT *
+//              FROM bank_accounts
+//              ORDER BY id
+//              LIMIT $1 OFFSET $2`,
+//             [limit, offset]
+//         );
+
+//         res.json({
+//             accounts: result.rows,
+//             pagination: {
+//                 limit,
+//                 offset
+//             }
+//         });
+
+//     } catch (error) {
+//         next(error);
+//     }
+// });
+
 // GET account by ID
-app.get('/accounts/:id', async (req, res) => {
+app.get('/accounts/:id', authRoutes,async (req, res) => {
     try {
         // Get account ID from URL
         const id = req.params.id;
@@ -94,7 +209,7 @@ app.get('/accounts/:id', async (req, res) => {
 });
 
 // POST - Create a new bank account
-app.post('/accounts', async (req, res) => {
+app.post('/accounts',authRoutes,async (req, res,next) => {
     try {
         // Extract data from request body
         const { account_name, balance } = req.body;
@@ -122,7 +237,7 @@ app.post('/accounts', async (req, res) => {
             });
         }
 
-        // Insert account into PostgreSQL
+        // // Insert account into PostgreSQL
         const result = await pool.query(
             `INSERT INTO bank_accounts (account_name, balance)
              VALUES ($1, $2)
@@ -137,16 +252,17 @@ app.post('/accounts', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error creating account:', error.message);
+        // console.error('Error creating account:', error.message);
 
-        res.status(500).json({
-            message: 'Failed to create account'
-        });
+        // res.status(500).json({
+        //     message: 'Failed to create account'
+        // });
+        next(error);
     }
 });
 
 // PATCH - Update an existing bank account
-app.patch('/accounts/:id', async (req, res) => {
+app.patch('/accounts/:id', authRoutes,validAccountId,async (req, res) => {
     try {
         // Get account ID from URL
         const { id } = req.params;
@@ -237,7 +353,7 @@ app.patch('/accounts/:id', async (req, res) => {
 });
 
  // DELETE - Remove a bank account
-app.delete('/accounts/:id', async (req, res) => {
+app.delete('/accounts/:id',authRoutes, async (req, res) => {
     try {
         // Get account ID from URL
         const { id } = req.params;
@@ -273,13 +389,27 @@ app.delete('/accounts/:id', async (req, res) => {
 
         res.status(500).json({
             message: 'Failed to delete account'
-        });
+        });  
+        
     }
 });
+// Handle requests to unknown routes
+app.use((req, res, next) => {
+    const error = new Error(
+        `Route not found: ${req.method} ${req.originalUrl}`
+    );
+
+    error.statusCode = 404;
+
+    next(error);
+});
+
+// Centralized error handler (must be last)
+app.use(errorHandler);
 
 
 
 // Start server
-app.listen(port, () => {
-    console.log(`Server is running on http://${host}:${port}`);
+app.listen(port,'0.0.0.0', () => {
+    console.log(`Server is running on port ${port}`);
 });
